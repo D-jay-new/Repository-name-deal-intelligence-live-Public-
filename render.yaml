@@ -1,0 +1,119 @@
+# Deal Intelligence Live Web App — Fast Deployment
+
+This package is ready for Render deployment.
+
+After deployment, you will get a public URL like:
+
+```text
+https://deal-intelligence-live.onrender.com
+```
+
+Open that URL from phone or laptop. No phone app installation is required.
+
+---
+
+## What this app does
+
+- Shows a premium mobile-friendly web page
+- Searches Amazon products using Keepa when API key is configured
+- Checks rating, review count, current price, historical low price, average price
+- Creates Deal Score and Review Trust Score
+- Opens selected product on Amazon
+- Falls back to demo mode if the Keepa key is missing
+
+---
+
+## Fastest Deployment Method: Render
+
+### Step 1 — Upload this folder to GitHub
+
+Create a new GitHub repository and upload all files from this folder.
+
+You can name the repo:
+
+```text
+deal-intelligence-live
+```
+
+### Step 2 — Create Render Web Service
+
+1. Go to Render Dashboard.
+2. Click **New +**
+3. Choose **Web Service**
+4. Connect your GitHub repository
+5. Use these settings:
+
+```text
+Language: Python
+Build Command: pip install -r requirements.txt
+Start Command: uvicorn main:app --host 0.0.0.0 --port $PORT
+```
+
+### Step 3 — Add Environment Variable
+
+In Render → your service → Environment, add:
+
+```text
+KEEPA_API_KEY = your_actual_keepa_api_key
+```
+
+Do not put the key inside the code.
+
+### Step 4 — Deploy
+
+Click deploy. After build completes, Render will give a public URL.
+
+---
+
+## Render Blueprint Option
+
+This package also includes:
+
+```text
+render.yaml
+```
+
+So you can deploy using Render Blueprints. You still need to add the real `KEEPA_API_KEY` in Render because secret values should not be committed.
+
+---
+
+## Local Test
+
+Windows:
+
+```text
+RUN_LOCAL_WINDOWS.bat
+```
+
+Mac/Linux:
+
+```bash
+chmod +x RUN_LOCAL_MAC_LINUX.sh
+./RUN_LOCAL_MAC_LINUX.sh
+```
+
+Then open:
+
+```text
+http://localhost:8000
+```
+
+---
+
+## Important
+
+If you do not add a Keepa API key, the app will still open but show demo data.
+
+For live data, you must add:
+
+```text
+KEEPA_API_KEY
+```
+
+in Render environment variables.
+
+---
+
+## Why the API key is not inside the web page
+
+A browser page is visible to users. If the key is kept inside HTML or JavaScript, anyone can copy it. Therefore, the key stays safely on the backend server.

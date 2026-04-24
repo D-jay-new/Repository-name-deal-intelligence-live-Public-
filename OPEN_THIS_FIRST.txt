@@ -1,0 +1,563 @@
+from __future__ import annotations
+
+import math
+import os
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+from dotenv import load_dotenv
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
+
+try:
+    import keepa
+except Exception:
+    keepa = None
+
+load_dotenv()
+
+BASE_DIR = Path(__file__).parent
+STATIC_DIR = BASE_DIR / "static"
+
+app = FastAPI(title="Deal Intelligence Live Web App", version="1.0.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+DOMAIN_IDS = {
+    "IN": 10,
+    "US": 1,
+    "UK": 2,
+    "DE": 3,
+    "FR": 4,
+    "JP": 5,
+    "CA": 6,
+    "IT": 8,
+    "ES": 9,
+    "MX": 11,
+    "BR": 12,
+}
+
+AMAZON_DOMAINS = {
+    "IN": "amazon.in",
+    "US": "amazon.com",
+    "UK": "amazon.co.uk",
+    "DE": "amazon.de",
+    "FR": "amazon.fr",
+    "JP": "amazon.co.jp",
+    "CA": "amazon.ca",
+    "IT": "amazon.it",
+    "ES": "amazon.es",
+    "MX": "amazon.com.mx",
+    "BR": "amazon.com.br",
+}
+
+PRICE_TYPE_INDEX = {
+    "Amazon": 0,
+    "Marketplace New": 1,
+    "Used": 2,
+    "List Price": 4,
+    "New FBA": 10,
+    "Buy Box": 18,
+}
+
+DEMO_PRODUCTS = [
+    {
+        "rank": 1,
+        "asin": "DEMO002",
+        "title": "Fast Charging Power Bank 20000mAh with Type-C PD Output",
+        "brand": "DemoVolt",
+        "image_url": None,
+        "rating": 4.3,
+        "review_count": 12500,
+        "current_price": 1599,
+        "historical_low": 1599,
+        "avg_price_365d": 2399,
+        "near_low_pct": 0,
+        "discount_vs_avg_pct": 33.35,
+        "sales_rank": 520,
+        "authenticity_score": 100,
+        "deal_score": 89.8,
+        "verdict": "Excellent deal",
+        "url": "Demo data",
+    },
+    {
+        "rank": 2,
+        "asin": "DEMO001",
+        "title": "Wireless Earbuds with ANC, Low Latency Gaming Mode",
+        "brand": "DemoPods",
+        "image_url": None,
+        "rating": 4.4,
+        "review_count": 8450,
+        "current_price": 1299,
+        "historical_low": 1249,
+        "avg_price_365d": 2199,
+        "near_low_pct": 4.0,
+        "discount_vs_avg_pct": 40.93,
+        "sales_rank": 890,
+        "authenticity_score": 100,
+        "deal_score": 88.1,
+        "verdict": "Excellent deal",
+        "url": "Demo data",
+    },
+    {
+        "rank": 3,
+        "asin": "DEMO003",
+        "title": "Ergonomic Wireless Office Mouse with Silent Clicks",
+        "brand": "DeskPro",
+        "image_url": None,
+        "rating": 4.6,
+        "review_count": 760,
+        "current_price": 699,
+        "historical_low": 649,
+        "avg_price_365d": 999,
+        "near_low_pct": 7.7,
+        "discount_vs_avg_pct": 30.03,
+        "sales_rank": 3400,
+        "authenticity_score": 90,
+        "deal_score": 77.4,
+        "verdict": "Strong deal",
+        "url": "Demo data",
+    },
+]
+
+
+class ScanRequest(BaseModel):
+    marketplace: str = Field(default="IN")
+    keyword: str = Field(default="wireless earbuds")
+    manual_asins: str = Field(default="")
+    price_type: str = Field(default="Marketplace New")
+    min_rating: float = Field(default=4.2)
+    min_reviews: int = Field(default=100)
+    min_score: float = Field(default=0)
+    pages: int = Field(default=2, ge=1, le=5)
+    top_n: int = Field(default=15, ge=1, le=50)
+
+
+@dataclass
+class ScoredProduct:
+    rank: int
+    asin: str
+    title: str
+    brand: Optional[str]
+    image_url: Optional[str]
+    rating: Optional[float]
+    review_count: Optional[int]
+    current_price: Optional[float]
+    historical_low: Optional[float]
+    avg_price_365d: Optional[float]
+    near_low_pct: Optional[float]
+    discount_vs_avg_pct: Optional[float]
+    sales_rank: Optional[int]
+    authenticity_score: float
+    deal_score: float
+    verdict: str
+    url: str
+
+
+def safe_float(value: Any) -> Optional[float]:
+    try:
+        if value is None:
+            return None
+        if isinstance(value, float) and math.isnan(value):
+            return None
+        return float(value)
+    except Exception:
+        return None
+
+
+def safe_int(value: Any) -> Optional[int]:
+    try:
+        if value is None:
+            return None
+        if isinstance(value, float) and math.isnan(value):
+            return None
+        return int(float(value))
+    except Exception:
+        return None
+
+
+def price_from_keepa(value: Any) -> Optional[float]:
+    value = safe_float(value)
+    if value is None or value <= 0:
+        return None
+    return round(value / 100, 2)
+
+
+def get_stat_value(product: Dict[str, Any], stat_name: str, index: int) -> Any:
+    stats = product.get("stats") or {}
+    arr = stats.get(stat_name)
+    if not isinstance(arr, list) or len(arr) <= index:
+        return None
+    val = arr[index]
+    if isinstance(val, list) and val:
+        return val[-1]
+    return val
+
+
+def get_current_rating(product: Dict[str, Any]) -> Optional[float]:
+    raw = get_stat_value(product, "current", 16)
+    if raw is None:
+        raw = product.get("rating") or product.get("reviewRating")
+    value = safe_float(raw)
+    if value is None or value <= 0:
+        return None
+    return round(value / 10, 2) if value > 5 else round(value, 2)
+
+
+def get_current_review_count(product: Dict[str, Any]) -> Optional[int]:
+    raw = get_stat_value(product, "current", 17)
+    if raw is None:
+        raw = product.get("reviewCount") or product.get("reviews")
+    return safe_int(raw)
+
+
+def get_sales_rank(product: Dict[str, Any]) -> Optional[int]:
+    raw = get_stat_value(product, "current", 3)
+    if raw:
+        return safe_int(raw)
+    raw = product.get("salesRank")
+    if raw:
+        return safe_int(raw)
+    ranks = product.get("salesRanks")
+    if isinstance(ranks, dict):
+        for _, series in ranks.items():
+            if isinstance(series, list) and series:
+                return safe_int(series[-1])
+    return None
+
+
+def extract_price_stats(product: Dict[str, Any], price_type_label: str) -> Dict[str, Optional[float]]:
+    idx = PRICE_TYPE_INDEX.get(price_type_label, 1)
+    current = price_from_keepa(get_stat_value(product, "current", idx))
+    low = price_from_keepa(get_stat_value(product, "min", idx))
+    avg_raw = (
+        get_stat_value(product, "avg365", idx)
+        or get_stat_value(product, "avg", idx)
+        or get_stat_value(product, "avg180", idx)
+        or get_stat_value(product, "avg90", idx)
+        or get_stat_value(product, "avg30", idx)
+    )
+    avg = price_from_keepa(avg_raw)
+    return {"current": current, "low": low, "avg": avg}
+
+
+def extract_image_url(product: Dict[str, Any]) -> Optional[str]:
+    images_csv = product.get("imagesCSV")
+    if not images_csv or not isinstance(images_csv, str):
+        return None
+    first = images_csv.split(",")[0].strip()
+    if not first:
+        return None
+    return f"https://m.media-amazon.com/images/I/{first}"
+
+
+def calculate_authenticity_score(
+    rating: Optional[float],
+    review_count: Optional[int],
+    sales_rank: Optional[int],
+    title: str,
+) -> float:
+    score = 50.0
+
+    if rating is None:
+        score -= 25
+    elif 4.2 <= rating <= 4.7:
+        score += 22
+    elif 3.9 <= rating < 4.2:
+        score += 10
+    elif rating > 4.7:
+        score += 8
+    else:
+        score -= 20
+
+    if review_count is None:
+        score -= 20
+    elif review_count >= 5000:
+        score += 25
+    elif review_count >= 1000:
+        score += 20
+    elif review_count >= 300:
+        score += 12
+    elif review_count >= 100:
+        score += 6
+    else:
+        score -= 22
+
+    if rating is not None and review_count is not None:
+        if rating >= 4.8 and review_count < 100:
+            score -= 25
+        if rating >= 4.6 and review_count < 50:
+            score -= 15
+
+    if sales_rank is None:
+        score -= 5
+    elif sales_rank <= 1000:
+        score += 10
+    elif sales_rank <= 10000:
+        score += 6
+    elif sales_rank <= 50000:
+        score += 2
+
+    suspicious_terms = [
+        "miracle", "100% guaranteed", "guaranteed result", "viral", "shocking",
+        "no.1", "number 1", "unbreakable", "best ever", "magic",
+    ]
+    lowered = title.lower()
+    for term in suspicious_terms:
+        if term in lowered:
+            score -= 6
+
+    return round(max(0, min(100, score)), 2)
+
+
+def calculate_deal_score(
+    rating: Optional[float],
+    review_count: Optional[int],
+    current_price: Optional[float],
+    historical_low: Optional[float],
+    avg_price: Optional[float],
+    authenticity_score: float,
+) -> Dict[str, Optional[float]]:
+    near_low_pct = None
+    discount_vs_avg_pct = None
+
+    if current_price and historical_low:
+        near_low_pct = round(((current_price - historical_low) / historical_low) * 100, 2)
+
+    if current_price and avg_price:
+        discount_vs_avg_pct = round(((avg_price - current_price) / avg_price) * 100, 2)
+
+    rating_score = 0 if rating is None else min(100, max(0, (rating - 3.5) / 1.5 * 100))
+    review_score = 0 if not review_count else min(100, math.log10(review_count + 1) / math.log10(10000) * 100)
+
+    if near_low_pct is None:
+        low_price_score = 40
+    elif near_low_pct <= 0:
+        low_price_score = 100
+    elif near_low_pct <= 3:
+        low_price_score = 92
+    elif near_low_pct <= 7:
+        low_price_score = 78
+    elif near_low_pct <= 15:
+        low_price_score = 55
+    else:
+        low_price_score = 25
+
+    if discount_vs_avg_pct is None:
+        discount_score = 40
+    elif discount_vs_avg_pct >= 40:
+        discount_score = 100
+    elif discount_vs_avg_pct >= 25:
+        discount_score = 85
+    elif discount_vs_avg_pct >= 15:
+        discount_score = 70
+    elif discount_vs_avg_pct >= 5:
+        discount_score = 55
+    else:
+        discount_score = 30
+
+    score = (
+        0.25 * low_price_score
+        + 0.15 * discount_score
+        + 0.25 * authenticity_score
+        + 0.20 * rating_score
+        + 0.15 * review_score
+    )
+
+    return {
+        "near_low_pct": near_low_pct,
+        "discount_vs_avg_pct": discount_vs_avg_pct,
+        "deal_score": round(score, 2),
+    }
+
+
+def verdict(score: float) -> str:
+    if score >= 85:
+        return "Excellent deal"
+    if score >= 75:
+        return "Strong deal"
+    if score >= 65:
+        return "Good deal"
+    if score >= 50:
+        return "Average"
+    return "Avoid / weak"
+
+
+def parse_asins(text: str) -> List[str]:
+    if not text.strip():
+        return []
+    raw = text.replace("\n", ",").replace(" ", ",").split(",")
+    return list(dict.fromkeys([x.strip() for x in raw if x.strip()]))
+
+
+def demo_response(req: ScanRequest) -> Dict[str, Any]:
+    products = [
+        p for p in DEMO_PRODUCTS
+        if p["deal_score"] >= req.min_score
+        and (p["rating"] or 0) >= req.min_rating
+        and (p["review_count"] or 0) >= req.min_reviews
+    ][: req.top_n]
+    for i, p in enumerate(products, start=1):
+        p["rank"] = i
+    return {
+        "mode": "demo",
+        "message": "Demo data shown. Add KEEPA_API_KEY in Render Environment Variables for live Amazon data.",
+        "products": products,
+    }
+
+
+def get_asins_from_keepa_deals(
+    api: Any,
+    marketplace: str,
+    keyword: str,
+    min_rating: float,
+    pages: int,
+    price_type_label: str,
+) -> List[str]:
+    domain_id = DOMAIN_IDS[marketplace]
+    price_type_index = PRICE_TYPE_INDEX.get(price_type_label, 1)
+    asins: List[str] = []
+
+    for page in range(pages):
+        deal_params = {
+            "page": page,
+            "domainId": domain_id,
+            "titleSearch": keyword,
+            "minRating": int(min_rating * 10),
+            "hasReviews": True,
+            "isLowest": True,
+            "isOutOfStock": False,
+            "isFilterEnabled": True,
+            "isRangeEnabled": True,
+            "priceTypes": [price_type_index],
+            "sortType": 4,
+        }
+        deals = api.deals(deal_params, domain=marketplace, wait=True)
+        rows = deals.get("dr", []) if isinstance(deals, dict) else []
+
+        for item in rows:
+            asin = None
+            if isinstance(item, dict):
+                asin = item.get("asin") or item.get("ASIN")
+            elif isinstance(item, str):
+                asin = item
+            if asin:
+                asins.append(str(asin))
+
+    return list(dict.fromkeys(asins))
+
+
+@app.get("/api/health")
+def health():
+    key = os.getenv("KEEPA_API_KEY", "").strip()
+    return {
+        "status": "ok",
+        "keepa_installed": keepa is not None,
+        "live_key_configured": bool(key and key != "your_keepa_api_key_here"),
+    }
+
+
+@app.post("/api/scan")
+def scan(req: ScanRequest):
+    api_key = os.getenv("KEEPA_API_KEY", "").strip()
+    if keepa is None or not api_key or api_key == "your_keepa_api_key_here":
+        return demo_response(req)
+
+    marketplace = req.marketplace.upper()
+    if marketplace not in DOMAIN_IDS:
+        marketplace = "IN"
+
+    api = keepa.Keepa(api_key)
+
+    asins = parse_asins(req.manual_asins)
+    if not asins:
+        asins = get_asins_from_keepa_deals(
+            api=api,
+            marketplace=marketplace,
+            keyword=req.keyword,
+            min_rating=req.min_rating,
+            pages=req.pages,
+            price_type_label=req.price_type,
+        )
+
+    if not asins:
+        return {"mode": "live", "message": "No matching products found.", "products": []}
+
+    products = api.query(
+        asins[:100],
+        domain=marketplace,
+        stats=3650,
+        history=False,
+        rating=True,
+        offers=20,
+        progress_bar=False,
+    )
+
+    scored: List[ScoredProduct] = []
+
+    for p in products:
+        asin = str(p.get("asin") or p.get("ASIN") or "")
+        if not asin:
+            continue
+
+        title = str(p.get("title") or "Untitled product")
+        brand = p.get("brand")
+        rating = get_current_rating(p)
+        review_count = get_current_review_count(p)
+        sales_rank = get_sales_rank(p)
+        prices = extract_price_stats(p, req.price_type)
+        auth = calculate_authenticity_score(rating, review_count, sales_rank, title)
+        meta = calculate_deal_score(rating, review_count, prices["current"], prices["low"], prices["avg"], auth)
+
+        if rating is not None and rating < req.min_rating:
+            continue
+        if review_count is not None and review_count < req.min_reviews:
+            continue
+        if meta["deal_score"] < req.min_score:
+            continue
+
+        scored.append(
+            ScoredProduct(
+                rank=0,
+                asin=asin,
+                title=title,
+                brand=str(brand) if brand else None,
+                image_url=extract_image_url(p),
+                rating=rating,
+                review_count=review_count,
+                current_price=prices["current"],
+                historical_low=prices["low"],
+                avg_price_365d=prices["avg"],
+                near_low_pct=meta["near_low_pct"],
+                discount_vs_avg_pct=meta["discount_vs_avg_pct"],
+                sales_rank=sales_rank,
+                authenticity_score=auth,
+                deal_score=meta["deal_score"],
+                verdict=verdict(meta["deal_score"]),
+                url=f"https://www.{AMAZON_DOMAINS[marketplace]}/dp/{asin}",
+            )
+        )
+
+    scored = sorted(scored, key=lambda x: x.deal_score, reverse=True)[: req.top_n]
+    for i, p in enumerate(scored, start=1):
+        p.rank = i
+
+    return {"mode": "live", "message": "Live Keepa data returned.", "products": [asdict(p) for p in scored]}
+
+
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+
+@app.get("/")
+def index():
+    return FileResponse(STATIC_DIR / "index.html")
